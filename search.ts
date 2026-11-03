@@ -2,6 +2,7 @@ import { FileFinder } from '@ff-labs/fff-node'
 import type {
   GrepCursor,
   GrepMatch,
+  GrepResult,
   Result,
   SearchResult as FileSearchResult,
 } from '@ff-labs/fff-node'
@@ -25,10 +26,17 @@ export type SearchRequest = {
   limit?: number
 }
 
-/** What one validated request runs: a glob listing, a fuzzy path search, or a literal content search. */
+/** What one validated request runs: a glob listing, a fuzzy path search, or a content search. */
 type Plan =
   | { kind: 'files'; call: 'glob' | 'query'; term: string; glob?: string; limit: number }
-  | { kind: 'content'; pattern: string; glob?: string; limit: number; context: number }
+  | {
+      kind: 'content'
+      pattern: string
+      regex: boolean
+      glob?: string
+      limit: number
+      context: number
+    }
 
 /** One indexed working directory; `using` counts the calls holding it, so none is released underneath another. */
 type Index = {
@@ -37,6 +45,18 @@ type Index = {
   using: number
   failed?: string
   idle?: ReturnType<typeof setTimeout>
+}
+
+/** A pattern is a regular expression when it uses regex syntax and compiles; anything else is literal text. */
+function isRegex(pattern: string) {
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  if (pattern === escaped) return false
+  try {
+    RegExp(pattern)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function plan(request: SearchRequest): Plan {
@@ -56,6 +76,7 @@ function plan(request: SearchRequest): Plan {
     return {
       kind: 'content',
       pattern,
+      regex: isRegex(pattern),
       ...(glob ? { glob } : {}),
       limit,
       context: Math.min(request.context ?? DEFAULT_CONTEXT, MAX_CONTEXT),
@@ -96,9 +117,10 @@ function matchingPaths(finder: FileFinder, glob: string): Set<string> {
 }
 
 /**
- * Content matches for a literal pattern, with the glob applied here: the native query parser would read a `?` glob
- * as search text. The native page is a soft target filled by whole chunks of files, so one match past `limit` proves
- * more exist rather than trusting its cursor, which only says files are unscanned.
+ * Content matches for a pattern, literal unless the request asked for a regular expression, with the glob applied
+ * here: the native query parser would read a `?` glob as search text. The native page is a soft target filled by
+ * whole chunks of files, so one match past `limit` proves more exist rather than trusting its cursor, which only says
+ * files are unscanned.
  */
 function matches(
   finder: FileFinder,
@@ -108,14 +130,23 @@ function matches(
   const shown: GrepMatch[] = []
   let cursor: GrepCursor | null = null
   while (shown.length <= wanted.limit) {
-    const page = finder.multiGrep({
-      patterns: [wanted.pattern],
-      pageSize: wanted.limit + 1,
-      maxMatchesPerFile: wanted.limit + 1,
-      beforeContext: wanted.context,
-      afterContext: wanted.context,
-      cursor,
-    })
+    const page: Result<GrepResult> = wanted.regex
+      ? finder.grep(wanted.pattern, {
+          mode: 'regex',
+          pageSize: wanted.limit + 1,
+          maxMatchesPerFile: wanted.limit + 1,
+          beforeContext: wanted.context,
+          afterContext: wanted.context,
+          cursor,
+        })
+      : finder.multiGrep({
+          patterns: [wanted.pattern],
+          pageSize: wanted.limit + 1,
+          maxMatchesPerFile: wanted.limit + 1,
+          beforeContext: wanted.context,
+          afterContext: wanted.context,
+          cursor,
+        })
     if (!page.ok) throw new Error(`Search failed: ${page.error}`)
     for (const match of page.value.items) {
       if (paths && !paths.has(match.relativePath)) continue

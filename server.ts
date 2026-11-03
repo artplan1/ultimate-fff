@@ -49,7 +49,7 @@ export default function search(host: SearchHost) {
       section(
         'search',
         () =>
-          'Use search for project file discovery and content search instead of bash rg, grep, find or ls. Use query for fuzzy file paths, pattern for literal content (use bash rg for a regex), or glob alone to list files; narrow with glob and read the matching files for full context. Search is read-only and returns bounded results; content counts with more matches are lower bounds.',
+          'Use search for project file discovery and content search instead of bash rg, grep, find or ls. Use query for fuzzy file paths, pattern for content (a regular expression when it has regex syntax, literal text otherwise), or glob alone to list files; narrow with glob and read the matching files for full context. Search is read-only and returns bounded results; content counts with more matches are lower bounds.',
       ),
     ],
     tools: [
@@ -57,7 +57,7 @@ export default function search(host: SearchHost) {
         name: 'search',
         // Every search only reads the index and writes no frecency or history database, so a rerun cannot do harm.
         replay: 'safe',
-        description: `Search files and the text inside them from a native index of the conversation's working directory. Prefer it over bash rg, grep, find or ls: query finds files by fuzzy path, pattern searches contents as literal text (use bash rg for a regex), glob filters either or lists files on its own, and one call returns relative paths, line numbers and context. The index follows file changes, so new files show up without a rescan. Read-only: it changes nothing in the project. limit defaults to ${DEFAULT_LIMIT} items (max ${MAX_LIMIT}) and context to ${DEFAULT_CONTEXT} lines (max ${MAX_CONTEXT}).`,
+        description: `Search files and the text inside them from a native index of the conversation's working directory. Prefer it over bash rg, grep, find or ls: query finds files by fuzzy path, pattern searches contents (a regular expression when the pattern uses regex syntax, literal text otherwise), glob filters either or lists files on its own, and one call returns relative paths, line numbers and context. The index follows file changes, so new files show up without a rescan. Read-only: it changes nothing in the project. limit defaults to ${DEFAULT_LIMIT} items (max ${MAX_LIMIT}) and context to ${DEFAULT_CONTEXT} lines (max ${MAX_CONTEXT}).`,
         parameters: obj({
           query: opt(
             str({
@@ -70,7 +70,7 @@ export default function search(host: SearchHost) {
             str({
               minLength: 1,
               description:
-                'Literal text to search for inside files, taken exactly as written, spaces and glob characters included; use bash rg for a regex. Omit to find files instead.',
+                'Text to search for inside files. Treated as a regular expression when it uses regex syntax and compiles, otherwise as literal text. Omit to find files instead.',
             }),
           ),
           glob: opt(
@@ -98,11 +98,7 @@ export default function search(host: SearchHost) {
         async execute(args, api, context) {
           const result = await index.search(args, api.env?.cwd ?? host.projectRoot)
           await api.details(result, context)
-          const hint =
-            result.items.length === 0 && args.pattern && /[|([\\]/.test(args.pattern)
-              ? '\nSearch matches literal text; use bash rg for a regex.'
-              : ''
-          return { output: [{ type: 'text', text: resultText(result) + hint }] }
+          return { output: [{ type: 'text', text: resultText(result) }] }
         },
       }),
     ],

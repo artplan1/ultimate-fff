@@ -19,12 +19,11 @@ To use it on every project on a machine, clone into `~/.ultimate/extensions/sear
 
 `search` runs over the conversation's working directory.
 
-- `query` finds files by fuzzy path. `pattern` searches inside files. Passing both is rejected.
-- `pattern` is literal text, matched exactly as written: spaces, `*`, `?`, `[...]` and `{...}` mean nothing special and never become query constraints.
+- `pattern` searches inside files. A pattern that uses regular-expression syntax and compiles is matched as a regular expression; anything else is literal text, taken exactly as written, so spaces and glob characters that do not form a valid expression never become query constraints. Passing both `query` and `pattern` is rejected.
 - `glob` limits either search, or lists matching files when it is the only argument. `?`, character classes, braces and spaces in a path all work. A glob without a `/` that starts with `*` matches file names at any depth; any other matches the path relative to the working directory, so use `**/` to reach nested files.
 - `context` adds lines around each content match (default 2, at most 10). `limit` bounds the items returned (default 30, at most 100).
 
-Content search is literal only. This version of fff has no entry point for a raw regular expression: its `grep` always parses the string as a query, and the raw matcher takes literals only. Use `bash` with `rg` for a regex. A pattern also cannot contain a newline, because the matcher searches line by line.
+A pattern cannot contain a newline, because the matcher searches line by line. A pattern with regex characters that does not compile is matched as literal text instead.
 
 Results say what they know. File counts are exact. For content, the count is the number returned, and "more matches than shown" appears only after the search actually found one further match — never guessed. A full content total would mean scanning every file on every search.
 
