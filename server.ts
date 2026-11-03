@@ -49,35 +49,35 @@ export default function search(host: SearchHost) {
       section(
         'search',
         () =>
-          'Use search for project file discovery and content search instead of bash rg, grep, find or ls. Use query for fuzzy file paths, pattern for content (a regular expression when it has regex syntax, literal text otherwise), or glob alone to list files; narrow with glob and read the matching files for full context. Search is read-only and returns bounded results; content counts with more matches are lower bounds.',
+          'Use search first for file discovery and content search. Prefer bare identifiers for efficient content matching, narrow with glob, and read files when you need more context.',
       ),
     ],
     tools: [
       defineTool({
         name: 'search',
-        // Every search only reads the index and writes no frecency or history database, so a rerun cannot do harm.
+        // No frecency or history writes: replay only reads the index.
         replay: 'safe',
-        description: `Search files and the text inside them from a native index of the conversation's working directory. Prefer it over bash rg, grep, find or ls: query finds files by fuzzy path, pattern searches contents (a regular expression when the pattern uses regex syntax, literal text otherwise), glob filters either or lists files on its own, and one call returns relative paths, line numbers and context. The index follows file changes, so new files show up without a rescan. Read-only: it changes nothing in the project. limit defaults to ${DEFAULT_LIMIT} items (max ${MAX_LIMIT}) and context to ${DEFAULT_CONTEXT} lines (max ${MAX_CONTEXT}).`,
+        description:
+          "Find file paths and search contents in the conversation's working directory. Read-only: fff indexes paths and literal text; regex runs ripgrep (rg required). Smart-case: uppercase makes content matching case-sensitive. Returns paths, lines and context; content counts cover only returned matches.",
         parameters: obj({
           query: opt(
             str({
               minLength: 1,
               description:
-                'Fuzzy path to find files by, such as a file name or path fragments like "workflow runner". Omit to search contents or list files by glob.',
+                'Fuzzy file path, e.g. "workflow runner". Use query or pattern, not both.',
             }),
           ),
           pattern: opt(
             str({
               minLength: 1,
               description:
-                'Text to search for inside files. Treated as a regular expression when it uses regex syntax and compiles, otherwise as literal text. Omit to find files instead.',
+                "Content pattern: auto-detects regex syntax, otherwise literal. Regex uses rg's default engine, without rewriting the pattern. Invalid or unsupported expressions stay literal.",
             }),
           ),
           glob: opt(
             str({
               minLength: 1,
-              description:
-                'Glob limiting the search, such as "src/**/*.ts"; on its own it lists the files that match.',
+              description: 'Path filter, e.g. "src/**/*.ts". On its own, lists matching files.',
             }),
           ),
           context: opt(

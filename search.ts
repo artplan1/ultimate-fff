@@ -2,11 +2,11 @@ import { FileFinder } from '@ff-labs/fff-node'
 import type {
   GrepCursor,
   GrepMatch,
-  GrepResult,
   Result,
   SearchResult as FileSearchResult,
 } from '@ff-labs/fff-node'
 import type { SearchResult } from './types.ts'
+import { searchRegex } from './regex.ts'
 
 /** How long an index nobody is searching stays before its native finder is released. */
 export const IDLE_MS = 5 * 60_000
@@ -49,8 +49,7 @@ type Index = {
 
 /** A pattern is a regular expression when it uses regex syntax and compiles; anything else is literal text. */
 function isRegex(pattern: string) {
-  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  if (pattern === escaped) return false
+  if (!/[.*+?^${}()|[\]\\]/.test(pattern)) return false
   try {
     RegExp(pattern)
     return true
@@ -70,9 +69,7 @@ function plan(request: SearchRequest): Plan {
   const limit = Math.min(request.limit ?? DEFAULT_LIMIT, MAX_LIMIT)
   if (pattern !== undefined) {
     if (pattern.includes('\n'))
-      throw new Error(
-        'A content pattern cannot contain a newline: the native matcher searches line by line.',
-      )
+      throw new Error('A content pattern cannot contain a newline: content search is line by line.')
     return {
       kind: 'content',
       pattern,
@@ -116,12 +113,7 @@ function matchingPaths(finder: FileFinder, glob: string): Set<string> {
   return paths
 }
 
-/**
- * Content matches for a pattern, literal unless the request asked for a regular expression, with the glob applied
- * here: the native query parser would read a `?` glob as search text. The native page is a soft target filled by
- * whole chunks of files, so one match past `limit` proves more exist rather than trusting its cursor, which only says
- * files are unscanned.
- */
+/** Literal search with an independent glob filter and one extra match to prove more exist. */
 function matches(
   finder: FileFinder,
   wanted: Extract<Plan, { kind: 'content' }>,
@@ -130,23 +122,15 @@ function matches(
   const shown: GrepMatch[] = []
   let cursor: GrepCursor | null = null
   while (shown.length <= wanted.limit) {
-    const page: Result<GrepResult> = wanted.regex
-      ? finder.grep(wanted.pattern, {
-          mode: 'regex',
-          pageSize: wanted.limit + 1,
-          maxMatchesPerFile: wanted.limit + 1,
-          beforeContext: wanted.context,
-          afterContext: wanted.context,
-          cursor,
-        })
-      : finder.multiGrep({
-          patterns: [wanted.pattern],
-          pageSize: wanted.limit + 1,
-          maxMatchesPerFile: wanted.limit + 1,
-          beforeContext: wanted.context,
-          afterContext: wanted.context,
-          cursor,
-        })
+    // multiGrep preserves literal text; grep's query parser would rewrite it.
+    const page = finder.multiGrep({
+      patterns: [wanted.pattern],
+      pageSize: wanted.limit + 1,
+      maxMatchesPerFile: wanted.limit + 1,
+      beforeContext: wanted.context,
+      afterContext: wanted.context,
+      cursor,
+    })
     if (!page.ok) throw new Error(`Search failed: ${page.error}`)
     for (const match of page.value.items) {
       if (paths && !paths.has(match.relativePath)) continue
@@ -235,6 +219,10 @@ export function createIndex() {
           const paths = wanted.glob === undefined ? undefined : matchingPaths(finder, wanted.glob)
           // A glob that matches no file leaves nothing to search.
           if (paths?.size === 0) return { kind: 'content', items: [], total: 0, more: 0 }
+          if (wanted.regex) {
+            const result = await searchRegex(wanted, cwd, paths)
+            if (result) return result
+          }
           return matches(finder, wanted, paths)
         }
         if (wanted.call === 'glob')
