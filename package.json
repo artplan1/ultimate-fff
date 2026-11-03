@@ -1,0 +1,21 @@
+{
+  "name": "ultimate-fff",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fast file and content search for Ultimate, backed by fff. One search tool instead of shelling out to rg.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./server.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-durable": "1.5.0",
+    "@earendil-works/pi-schema": "1.5.0"
+  },
+  "dependencies": {
+    "@ff-labs/fff-node": "0.11.0"
+  },
+  "engines": {
+    "node": ">=26"
+  }
+}
