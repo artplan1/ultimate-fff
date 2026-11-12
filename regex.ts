@@ -11,8 +11,7 @@ function text(value: { text?: string; bytes?: string }): string {
 /** Raw regex search; null asks the caller to retry an unsupported expression literally. */
 export async function searchRegex(
   wanted: { pattern: string; context: number; limit: number },
-  cwd: string,
-  paths?: Set<string>,
+  search: { cwd: string; path: string; accept: (path: string) => boolean },
 ): Promise<SearchResult | null> {
   const child = spawn(
     'rg',
@@ -26,9 +25,10 @@ export async function searchRegex(
       '--regexp',
       wanted.pattern,
       '--',
-      '.',
+      // The scope itself, so a narrowed search does not walk the whole root.
+      search.path,
     ],
-    { cwd, stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: search.cwd, stdio: ['ignore', 'pipe', 'pipe'] },
   )
   let failure: Error | undefined
   child.on('error', (error) => (failure = error))
@@ -55,10 +55,10 @@ export async function searchRegex(
       }
       if (event.type === 'match' || event.type === 'context') {
         const data = event.data
-        const path = relative(cwd, resolve(cwd, text(data.path)))
+        const path = relative(search.cwd, resolve(search.cwd, text(data.path)))
           .split(sep)
           .join('/')
-        if (paths && !paths.has(path)) continue
+        if (!search.accept(path)) continue
         const number: number = data.line_number
         const source = text(data.lines).replace(/\r?\n$/, '')
         if (number !== previousLine + 1) before = []

@@ -1,3 +1,5 @@
+import { existsSync, statSync } from 'node:fs'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { FileFinder } from '@ff-labs/fff-node'
 import type {
   GrepCursor,
@@ -17,28 +19,29 @@ export const MAX_LIMIT = 100
 export const DEFAULT_CONTEXT = 2
 export const MAX_CONTEXT = 10
 
-/** One `search` call, as the tool accepts it. */
-export type SearchRequest = {
-  query?: string
-  pattern?: string
+/** One `grep` call, as the tool accepts it. */
+export type GrepRequest = {
+  pattern: string
+  path?: string
   glob?: string
   context?: number
   limit?: number
 }
 
-/** What one validated request runs: a glob listing, a fuzzy path search, or a content search. */
-type Plan =
-  | { kind: 'files'; call: 'glob' | 'query'; term: string; glob?: string; limit: number }
-  | {
-      kind: 'content'
-      pattern: string
-      regex: boolean
-      glob?: string
-      limit: number
-      context: number
-    }
+/** One `find` call, as the tool accepts it. */
+export type FindRequest = { pattern: string; path?: string; glob?: string; limit?: number }
 
-/** One indexed working directory; `using` counts the calls holding it, so none is released underneath another. */
+/** A `grep` call's pattern with the context and limit it runs with. */
+type Wanted = { pattern: string; limit: number; context: number }
+
+/**
+ * Where a call searches: the indexed root, the conversation's working directory that its paths are reported against,
+ * and the scope inside the root — a subdirectory prefix, or one file. A scope inside the working directory reuses its
+ * index; anything else is indexed on its own.
+ */
+type Scope = { root: string; cwd: string; prefix: string; file?: string }
+
+/** One indexed directory; `using` counts the calls holding it, so none is released underneath another. */
 type Index = {
   finder: FileFinder
   ready: Promise<void>
@@ -58,44 +61,51 @@ function isRegex(pattern: string) {
   }
 }
 
-function plan(request: SearchRequest): Plan {
-  const { query, pattern, glob } = request
-  if (query !== undefined && pattern !== undefined)
-    throw new Error(
-      'Pass either query (find files by path) or pattern (search file contents), not both.',
-    )
-  if (pattern === undefined && request.context !== undefined)
-    throw new Error('context applies to content search; pass pattern to use it.')
-  const limit = Math.min(request.limit ?? DEFAULT_LIMIT, MAX_LIMIT)
-  if (pattern !== undefined) {
-    if (pattern.includes('\n'))
-      throw new Error('A content pattern cannot contain a newline: content search is line by line.')
-    return {
-      kind: 'content',
-      pattern,
-      regex: isRegex(pattern),
-      ...(glob ? { glob } : {}),
-      limit,
-      context: Math.min(request.context ?? DEFAULT_CONTEXT, MAX_CONTEXT),
-    }
-  }
-  if (query !== undefined) return { kind: 'files', call: 'query', term: query, glob, limit }
-  if (glob === undefined)
-    throw new Error(
-      'Pass query (fuzzy path search), pattern (content search) or glob (file filter or listing).',
-    )
-  return { kind: 'files', call: 'glob', term: glob, limit }
+/** A `find` pattern is a glob when it uses glob syntax; anything else is a fuzzy path query. */
+function isGlob(pattern: string) {
+  return /[?*[{]/.test(pattern)
 }
 
-function found(result: Result<FileSearchResult>, limit: number): SearchResult {
-  if (!result.ok) throw new Error(`Search failed: ${result.error}`)
-  const items = result.value.items.slice(0, limit).map((item) => ({ path: item.relativePath }))
+/** `path` resolved against the working directory: a scope inside it keeps its index, one outside is indexed alone. */
+function scopeFor(cwd: string, path: string | undefined): Scope {
+  if (path === undefined) return { root: cwd, cwd, prefix: '' }
+  const wanted = resolve(cwd, path)
+  if (!existsSync(wanted)) throw new Error(`Path not found: ${path}`)
+  const isDirectory = statSync(wanted).isDirectory()
+  const file = isDirectory ? undefined : wanted
+  const root = file ? dirname(file) : wanted
+  const inside = relative(cwd, root)
+  const under = inside === '' || (!inside.startsWith('..') && !isAbsolute(inside))
+  const prefix = under && inside !== '' ? inside.split(sep).join('/') + '/' : ''
   return {
-    kind: 'files',
-    items,
-    total: result.value.totalMatched,
-    more: Math.max(result.value.totalMatched - items.length, 0),
+    root: under ? cwd : root,
+    cwd,
+    prefix,
+    ...(file === undefined ? {} : { file: prefix + basename(file) }),
   }
+}
+
+/** Whether an index-relative path lies inside the scope. */
+function within(scope: Scope, path: string) {
+  return scope.file === undefined ? path.startsWith(scope.prefix) : path === scope.file
+}
+
+/**
+ * The scope as the model sees it: paths relative to the working directory, or absolute when the search lies outside
+ * it, so every returned path can be read as it is.
+ */
+function shown(scope: Scope, result: SearchResult): SearchResult {
+  if (scope.root === scope.cwd) return result
+  return {
+    ...result,
+    items: result.items.map((item) => ({ ...item, path: resolve(scope.root, item.path) })),
+  }
+}
+
+/** Whether the index holds a named file; one it does not hold is usually ignored, and searching it finds nothing. */
+function indexed(finder: FileFinder, path: string) {
+  const listing = finder.glob(path, { pageSize: 1 })
+  return !listing.ok || listing.value.totalMatched > 0
 }
 
 /** The paths a glob matches, as the glob listing itself reports them, to filter a content search by. */
@@ -113,15 +123,16 @@ function matchingPaths(finder: FileFinder, glob: string): Set<string> {
   return paths
 }
 
-/** Literal search with an independent glob filter and one extra match to prove more exist. */
+/** Literal search with independent glob and scope filters and one extra match to prove more exist. */
 function matches(
   finder: FileFinder,
-  wanted: Extract<Plan, { kind: 'content' }>,
+  wanted: Wanted,
+  scope: Scope,
   paths?: Set<string>,
 ): SearchResult {
-  const shown: GrepMatch[] = []
+  const hits: GrepMatch[] = []
   let cursor: GrepCursor | null = null
-  while (shown.length <= wanted.limit) {
+  while (hits.length <= wanted.limit) {
     // multiGrep preserves literal text; grep's query parser would rewrite it.
     const page = finder.multiGrep({
       patterns: [wanted.pattern],
@@ -133,27 +144,59 @@ function matches(
     })
     if (!page.ok) throw new Error(`Search failed: ${page.error}`)
     for (const match of page.value.items) {
-      if (paths && !paths.has(match.relativePath)) continue
-      shown.push(match)
-      if (shown.length > wanted.limit) break
+      if (!within(scope, match.relativePath) || (paths && !paths.has(match.relativePath)))
+        continue
+      hits.push(match)
+      if (hits.length > wanted.limit) break
     }
-    if (shown.length > wanted.limit || page.value.nextCursor === null) break
+    if (hits.length > wanted.limit || page.value.nextCursor === null) break
     cursor = page.value.nextCursor
   }
-  const items = shown.slice(0, wanted.limit).map((match) => ({
+  const items = hits.slice(0, wanted.limit).map((match) => ({
     path: match.relativePath,
     line: match.lineNumber,
     text: match.lineContent,
     ...(match.contextBefore?.length ? { before: match.contextBefore } : {}),
     ...(match.contextAfter?.length ? { after: match.contextAfter } : {}),
   }))
-  return { kind: 'content', items, total: items.length, more: shown.length > items.length ? 1 : 0 }
+  return { kind: 'content', items, total: items.length, more: hits.length > items.length ? 1 : 0 }
 }
 
 /**
- * The native finders, one per working directory, scanned once and owned by the calls that use them. An unused index
- * is released after `IDLE_MS`; `dispose` releases the rest when the extension unloads, keeping any still in use until
- * its last call finishes. Scans need no frecency or history database, so nothing is written to the searched tree.
+ * A file listing narrowed to the scope and, when given, to the paths a glob matches. Narrowing fetches the whole match
+ * set, as the index reports it, so the counts stay exact rather than guessed from a page.
+ */
+function listing(
+  run: (pageSize: number) => Result<FileSearchResult>,
+  scope: Scope,
+  limit: number,
+  paths?: Set<string>,
+): SearchResult {
+  const first = run(limit)
+  if (!first.ok) throw new Error(`Search failed: ${first.error}`)
+  const narrowed = scope.prefix !== '' || scope.file !== undefined || paths !== undefined
+  const all =
+    narrowed && first.value.totalMatched > first.value.items.length
+      ? run(first.value.totalMatched)
+      : first
+  if (!all.ok) throw new Error(`Search failed: ${all.error}`)
+  const items = all.value.items.filter(
+    (item) => within(scope, item.relativePath) && (!paths || paths.has(item.relativePath)),
+  )
+  const total = narrowed ? items.length : all.value.totalMatched
+  const page = items.slice(0, limit)
+  return {
+    kind: 'files',
+    items: page.map((item) => ({ path: item.relativePath })),
+    total,
+    more: Math.max(total - page.length, 0),
+  }
+}
+
+/**
+ * The native finders, one per searched root, scanned once and owned by the calls that use them. An unused index is
+ * released after `IDLE_MS`; `dispose` releases the rest when the extension unloads, keeping any still in use until its
+ * last call finishes. Scans need no frecency or history database, so nothing is written to the searched tree.
  */
 export function createIndex() {
   const indexes = new Map<string, Index>()
@@ -207,40 +250,80 @@ export function createIndex() {
     index.idle.unref?.()
   }
 
+  /** Wait for the scope's index; a scan that failed or timed out fails this call instead of searching it. */
+  async function ready(index: Index) {
+    await index.ready
+    if (index.failed) throw new Error(index.failed)
+  }
+
   return {
-    async search(request: SearchRequest, cwd: string): Promise<SearchResult> {
-      const wanted = plan(request)
-      const index = acquire(cwd)
+    async grep(request: GrepRequest, cwd: string): Promise<SearchResult> {
+      if (request.pattern.includes('\n'))
+        throw new Error(
+          'A content pattern cannot contain a newline: content search is line by line.',
+        )
+      const scope = scopeFor(cwd, request.path)
+      const wanted: Wanted = {
+        pattern: request.pattern,
+        limit: Math.min(request.limit ?? DEFAULT_LIMIT, MAX_LIMIT),
+        context: Math.min(request.context ?? DEFAULT_CONTEXT, MAX_CONTEXT),
+      }
+      const index = acquire(scope.root)
       try {
-        await index.ready
-        if (index.failed) throw new Error(index.failed)
+        await ready(index)
         const { finder } = index
-        if (wanted.kind === 'content') {
-          const paths = wanted.glob === undefined ? undefined : matchingPaths(finder, wanted.glob)
-          // A glob that matches no file leaves nothing to search.
-          if (paths?.size === 0) return { kind: 'content', items: [], total: 0, more: 0 }
-          if (wanted.regex) {
-            const result = await searchRegex(wanted, cwd, paths)
-            if (result) return result
-          }
-          return matches(finder, wanted, paths)
-        }
-        if (wanted.call === 'glob')
-          return found(finder.glob(wanted.term, { pageSize: wanted.limit }), wanted.limit)
-        let result = finder.fileSearch(wanted.term, { pageSize: wanted.limit })
-        if (wanted.glob && result.ok && result.value.totalMatched > 0) {
-          const paths = matchingPaths(finder, wanted.glob)
-          result = finder.fileSearch(wanted.term, { pageSize: result.value.totalMatched })
-          if (result.ok) {
-            const items = result.value.items.filter((item) => paths.has(item.relativePath))
-            result = { ok: true, value: { ...result.value, items, totalMatched: items.length } }
-          }
-        }
-        return found(result, wanted.limit)
+        // A named file the index does not hold is usually ignored, so searching it would report no matches it never
+        // looked for; say so instead.
+        if (scope.file !== undefined && !indexed(finder, scope.file))
+          throw new Error(
+            `${request.path} is not in the search index, so its contents are not searched; it is probably ignored. Read the file instead.`,
+          )
+        const paths =
+          request.glob === undefined ? undefined : matchingPaths(finder, request.glob)
+        // A glob that matches no file leaves nothing to search.
+        if (paths?.size === 0) return { kind: 'content', items: [], total: 0, more: 0 }
+        // Regex runs through rg; an expression rg rejects retries as literal text.
+        const regex = isRegex(wanted.pattern)
+          ? await searchRegex(wanted, {
+              cwd: scope.root,
+              path: scope.file ?? (scope.prefix || '.'),
+              accept: (path) => within(scope, path) && (!paths || paths.has(path)),
+            })
+          : null
+        return shown(scope, regex ?? matches(finder, wanted, scope, paths))
       } finally {
-        release(cwd, index)
+        release(scope.root, index)
       }
     },
+
+    async find(request: FindRequest, cwd: string): Promise<SearchResult> {
+      const scope = scopeFor(cwd, request.path)
+      const limit = Math.min(request.limit ?? DEFAULT_LIMIT, MAX_LIMIT)
+      const index = acquire(scope.root)
+      try {
+        await ready(index)
+        const { finder } = index
+        const { pattern } = request
+        // A glob narrows whatever the pattern finds, so a fuzzy match and a glob intersect.
+        const paths = request.glob === undefined ? undefined : matchingPaths(finder, request.glob)
+        if (paths?.size === 0) return { kind: 'files', items: [], total: 0, more: 0 }
+        return shown(
+          scope,
+          listing(
+            (pageSize) =>
+              isGlob(pattern)
+                ? finder.glob(pattern, { pageSize })
+                : finder.fileSearch(pattern, { pageSize }),
+            scope,
+            limit,
+            paths,
+          ),
+        )
+      } finally {
+        release(scope.root, index)
+      }
+    },
+
     /** Release every index no call is using; an index in use is released when its last call ends. */
     dispose() {
       closed = true

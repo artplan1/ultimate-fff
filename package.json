@@ -2,9 +2,12 @@
   "name": "ultimate-fff",
   "version": "0.1.0",
   "private": true,
-  "description": "Fast file and content search for Ultimate, backed by fff. One search tool instead of shelling out to rg.",
+  "description": "Read-only search for Ultimate: grep for file contents, find for paths, backed by fff.",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.ts"
+  },
   "exports": {
     ".": "./server.ts"
   },

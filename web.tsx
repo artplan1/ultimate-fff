@@ -22,12 +22,17 @@ function excerpt(item: SearchResult['items'][number]) {
   ]
 }
 
-function Search({ call }: { call: ToolCallView }) {
+/** One card for both tools: the pattern searched, its scope, then paths, or matched lines grouped by file. */
+function Matches({ call }: { call: ToolCallView }) {
   const duration = useToolDuration(call)
   const result = call.details as SearchResult | undefined
   const failed = call.status === 'error'
-  const term = call.args.pattern ?? call.args.query ?? call.args.glob
-  const title = typeof term === 'string' ? term : ''
+  const pattern = call.args.pattern
+  const title = typeof pattern === 'string' ? pattern : ''
+  // `path` and `glob` narrow what was searched, so the call shows them beside the counts.
+  const scope = [call.args.path, call.args.glob].filter(
+    (value): value is string => typeof value === 'string',
+  )
   const groups = new Map<string, SearchResult['items']>()
   for (const item of result?.items ?? []) {
     const items = groups.get(item.path) ?? []
@@ -37,11 +42,14 @@ function Search({ call }: { call: ToolCallView }) {
   return (
     <Tool defaultOpen={failed}>
       <ToolHeader
-        name="search"
+        name={call.name}
         state={call.status}
         title={title}
         meta={
           <>
+            {scope.map((value) => (
+              <span key={value}>{value}</span>
+            ))}
             {result && (
               <span>
                 {result.total}
@@ -99,4 +107,4 @@ function Search({ call }: { call: ToolCallView }) {
   )
 }
 
-export default defineWebExtension({ tools: { search: Search } })
+export default defineWebExtension({ tools: { grep: Matches, find: Matches } })
