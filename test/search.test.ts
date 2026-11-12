@@ -24,8 +24,10 @@ before(() => {
   file(cwd, 'src/nested/deep.ts', 'const needle = 1\n')
   file(cwd, 'src/window.txt', 'alpha\ntarget\nomega\n')
   file(cwd, 'docs/guide.md', 'needle in docs\n')
-  file(cwd, '.gitignore', 'hidden.txt\n')
+  file(cwd, '.gitignore', 'hidden.txt\nignored/\n')
   file(cwd, 'hidden.txt', 'needle hidden\n')
+  file(cwd, 'ignored/skip.ts', 'needle ignored\n')
+  mkdirSync(join(cwd, 'empty'))
   file(external, 'other.ts', 'external needle\n')
 })
 
@@ -133,6 +135,32 @@ test('a named file the index skips is reported, not searched to an empty result'
     index.grep({ pattern: 'needle', path: 'hidden.txt' }, cwd),
     /hidden\.txt is not in the search index/,
   )
+})
+
+test('a directory the index skips is reported, not searched to an empty result', async () => {
+  await assert.rejects(
+    index.grep({ pattern: 'needle', path: 'ignored' }, cwd),
+    /ignored is not in the search index, so nothing under it is searched/,
+  )
+  await assert.rejects(
+    index.find({ pattern: '**/*.ts', path: 'ignored' }, cwd),
+    /ignored is not in the search index/,
+  )
+})
+
+test('a searched directory with no match still reports an empty result', async () => {
+  const content = await index.grep({ pattern: 'absent-token', path: 'src' }, cwd)
+  assert.deepEqual(paths(content), [])
+  assert.equal(content.total, 0)
+  const files = await index.find({ pattern: '**/*.md', path: 'src' }, cwd)
+  assert.deepEqual(paths(files), [])
+  assert.equal(files.total, 0)
+})
+
+test('a directory empty on disk reports no files instead of an unsearched scope', async () => {
+  const found = await index.find({ pattern: '**/*', path: 'empty' }, cwd)
+  assert.deepEqual(paths(found), [])
+  assert.equal(found.total, 0)
 })
 
 test('both tools run over the working directory through their tool calls', async () => {

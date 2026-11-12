@@ -40,7 +40,7 @@ grep({ pattern: 'TODO|FIXME', path: 'src' })
 grep({ pattern: 'createIndex', glob: '**/*.ts', context: 3 })
 ```
 
-A pattern cannot contain a newline: content search is line by line. A `path` naming a file the index skips — an ignored one, say — fails with that reason instead of reporting no matches. Prefer bare identifiers for efficient matching, narrow with `path` or `glob`, and read files when you need more context.
+A pattern cannot contain a newline: content search is line by line. A `path` naming a file or a directory the index skips — an ignored one, say — fails with that reason instead of reporting no matches; one that is simply empty reports nothing. Prefer bare identifiers for efficient matching, narrow with `path` or `glob`, and read files when you need more context.
 
 ### find
 

@@ -1,4 +1,4 @@
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, opendirSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { FileFinder } from '@ff-labs/fff-node'
 import type {
@@ -106,6 +106,36 @@ function shown(scope: Scope, result: SearchResult): SearchResult {
 function indexed(finder: FileFinder, path: string) {
   const listing = finder.glob(path, { pageSize: 1 })
   return !listing.ok || listing.value.totalMatched > 0
+}
+
+/** Whether a directory holds no entries at all, so a search under it honestly finds nothing. */
+function emptyDir(dir: string) {
+  try {
+    const opened = opendirSync(dir)
+    try {
+      return opened.readSync() === null
+    } finally {
+      opened.closeSync()
+    }
+  } catch {
+    // One that cannot be read is not one known to be empty.
+    return false
+  }
+}
+
+/**
+ * Refuse a directory the index holds nothing under, usually because it ignores it: such a search reports no matches
+ * for a directory it never looked in. A directory empty on disk really has nothing to find.
+ */
+function requireIndexed(finder: FileFinder, scope: Scope, path: string) {
+  if (scope.prefix === '') return
+  const under = finder.glob(`${scope.prefix}**`, { pageSize: 1 })
+  // A listing that failed says nothing about the index, so searching it stays the honest answer.
+  if (!under.ok || under.value.totalMatched > 0) return
+  if (emptyDir(resolve(scope.root, scope.prefix))) return
+  throw new Error(
+    `${path} is not in the search index, so nothing under it is searched; it is probably ignored. Read the file instead.`,
+  )
 }
 
 /** The paths a glob matches, as the glob listing itself reports them, to filter a content search by. */
@@ -278,6 +308,8 @@ export function createIndex() {
           throw new Error(
             `${request.path} is not in the search index, so its contents are not searched; it is probably ignored. Read the file instead.`,
           )
+        // Likewise a directory the index holds nothing under was never searched.
+        if (request.path !== undefined) requireIndexed(finder, scope, request.path)
         const paths =
           request.glob === undefined ? undefined : matchingPaths(finder, request.glob)
         // A glob that matches no file leaves nothing to search.
@@ -303,6 +335,7 @@ export function createIndex() {
       try {
         await ready(index)
         const { finder } = index
+        if (request.path !== undefined) requireIndexed(finder, scope, request.path)
         const { pattern } = request
         // A glob narrows whatever the pattern finds, so a fuzzy match and a glob intersect.
         const paths = request.glob === undefined ? undefined : matchingPaths(finder, request.glob)
